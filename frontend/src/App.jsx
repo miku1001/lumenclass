@@ -1,7 +1,18 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import mqtt from 'mqtt'
 import './App.css'
+import { supabase } from './supabase.js'
+
+// ─── MQTT BROKER URL ─────────────────────────────────────────
+// Set VITE_MQTT_BROKER_URL in .env (e.g. ws://192.168.1.100:9001)
+const MQTT_BROKER_URL = import.meta.env.VITE_MQTT_BROKER_URL || ''
+
+// ─── CHART HISTORY SETTINGS ──────────────────────────────────
+const BUCKET_MS   = 10_000  // one data point per 10 s
+const MAX_BUCKETS = 60      // 60 × 10 s = 10-minute rolling window
 
 // ─── DATA ────────────────────────────────────────────────────
+// r204 is the room wired to the ESP8266 — its KPIs and zones receive live MQTT data.
 const ROOMS = [
   { id: 'r204', label: 'Room 204', sub: 'Floor 2 · East Wing' },
   { id: 'r101', label: 'Room 101', sub: 'Floor 1 · Entrance' },
@@ -15,34 +26,34 @@ const ROOM_DATA = {
     title: 'Room 204 — Lighting Overview',
     desc: 'Live daylight & occupancy monitoring with edge-driven automation',
     kpis: [
-      { cls: 'k1', icon: 'sun',   trend: 'DAYLIGHT', trendCls: 'up', val: '742', unit: 'lux',     lab: 'Ambient brightness (LDR)' },
-      { cls: 'k2', icon: 'users', trend: 'OCCUPIED',  trendCls: 'up', val: '23',  unit: 'present', lab: 'Occupancy (PIR motion)' },
-      { cls: 'k3', icon: 'alert', trend: '1 active',  trendCls: 'dn', val: '3',  unit: 'today',   lab: 'Alerts & events' },
+      { cls: 'k1', icon: 'sun',   trend: 'DAYLIGHT', trendCls: 'up', val: '—',  unit: 'lux',     lab: 'Ambient brightness (LDR)' },
+      { cls: 'k2', icon: 'users', trend: '—',        trendCls: 'up', val: '—',  unit: 'present', lab: 'Occupancy (PIR motion)' },
+      { cls: 'k3', icon: 'alert', trend: '1 active', trendCls: 'dn', val: '3',  unit: 'today',   lab: 'Alerts & events' },
     ],
     zones: [
-      { id: 'zA', name: 'Zone A — Front',  meta: 'Occupied · auto-dimmed by daylight', on: true,  dim: 35,  tag: 'AUTO' },
-      { id: 'zB', name: 'Zone B — Rear',   meta: 'Occupied · lower daylight at rear',  on: true,  dim: 68,  tag: 'AUTO' },
-      { id: 'zH', name: 'Hallway light',   meta: 'No motion 12 min · switched off',    on: false, dim: 0,   tag: 'OFF' },
-      { id: 'zC', name: 'Zone C — Window', meta: 'Partial daylight · gentle dimming',  on: true,  dim: 45,  tag: 'AUTO' },
+      { id: 'zA', name: 'Zone A — Front',  meta: 'PIR zone 0',  on: false, dim: 0,  tag: 'AUTO' },
+      { id: 'zB', name: 'Zone B — Rear',   meta: 'PIR zone 1',  on: false, dim: 0,  tag: 'AUTO' },
+      { id: 'zH', name: 'Hallway light',   meta: 'PIR zone 2',  on: false, dim: 0,  tag: 'AUTO' },
+      { id: 'zC', name: 'Zone C — Window', meta: 'PIR zone 3',  on: false, dim: 0,  tag: 'AUTO' },
     ],
-    sensorLux: '500',
-    sensorDecision: 'Dimming → 35%',
-    sensorDecisionNote: 'Sufficient daylight detected',
+    sensorLux: '—',
+    sensorDecision: '—',
+    sensorDecisionNote: 'Waiting for edge data…',
   },
   r101: {
     title: 'Room 101 — Lighting Overview',
     desc: 'Entrance area with motion-triggered lighting automation',
     kpis: [
-      { cls: 'k1', icon: 'sun',   trend: 'DAYLIGHT', trendCls: 'up', val: '390', unit: 'lux',     lab: 'Ambient brightness (LDR)' },
-      { cls: 'k2', icon: 'users', trend: 'OCCUPIED',  trendCls: 'up', val: '8',   unit: 'present', lab: 'Occupancy (PIR motion)' },
+      { cls: 'k1', icon: 'sun',   trend: 'DAYLIGHT', trendCls: 'up', val: '390', unit: 'lux',       lab: 'Ambient brightness (LDR)' },
+      { cls: 'k2', icon: 'users', trend: 'OCCUPIED',  trendCls: 'up', val: '8',   unit: 'present',   lab: 'Occupancy (PIR motion)' },
       { cls: 'k3', icon: 'zap',   trend: '↓ 22%',    trendCls: 'up', val: '2.1', unit: 'kWh saved', lab: 'Energy saved today' },
-      { cls: 'k4', icon: 'alert', trend: '0 active',  trendCls: 'up', val: '1',  unit: 'today',   lab: 'Alerts & events' },
+      { cls: 'k4', icon: 'alert', trend: '0 active',  trendCls: 'up', val: '1',  unit: 'today',     lab: 'Alerts & events' },
     ],
     zones: [
-      { id: 'zA', name: 'Zone A — Entry',  meta: 'Occupied · full brightness',          on: true,  dim: 100, tag: 'AUTO' },
-      { id: 'zB', name: 'Zone B — Lobby',  meta: 'Partial motion · dimmed',             on: true,  dim: 55,  tag: 'AUTO' },
-      { id: 'zH', name: 'Exit lights',     meta: 'Always on · safety override',         on: true,  dim: 80,  tag: 'AUTO' },
-      { id: 'zC', name: 'Zone C — Corridor', meta: 'Low traffic · standby',             on: true,  dim: 25,  tag: 'AUTO' },
+      { id: 'zA', name: 'Zone A — Entry',     meta: 'Occupied · full brightness',   on: true,  dim: 100, tag: 'AUTO' },
+      { id: 'zB', name: 'Zone B — Lobby',     meta: 'Partial motion · dimmed',      on: true,  dim: 55,  tag: 'AUTO' },
+      { id: 'zH', name: 'Exit lights',        meta: 'Always on · safety override',  on: true,  dim: 80,  tag: 'AUTO' },
+      { id: 'zC', name: 'Zone C — Corridor',  meta: 'Low traffic · standby',        on: true,  dim: 25,  tag: 'AUTO' },
     ],
     sensorLux: '390',
     sensorDecision: 'Full ON → 100%',
@@ -52,16 +63,16 @@ const ROOM_DATA = {
     title: 'Room 305 — Lighting Overview',
     desc: 'Lab wing with precision dimming for sensitive equipment',
     kpis: [
-      { cls: 'k1', icon: 'sun',   trend: 'DAYLIGHT', trendCls: 'up', val: '610', unit: 'lux',     lab: 'Ambient brightness (LDR)' },
-      { cls: 'k2', icon: 'users', trend: 'OCCUPIED',  trendCls: 'up', val: '14',  unit: 'present', lab: 'Occupancy (PIR motion)' },
+      { cls: 'k1', icon: 'sun',   trend: 'DAYLIGHT', trendCls: 'up', val: '610', unit: 'lux',       lab: 'Ambient brightness (LDR)' },
+      { cls: 'k2', icon: 'users', trend: 'OCCUPIED',  trendCls: 'up', val: '14',  unit: 'present',   lab: 'Occupancy (PIR motion)' },
       { cls: 'k3', icon: 'zap',   trend: '↓ 45%',    trendCls: 'up', val: '6.2', unit: 'kWh saved', lab: 'Energy saved today' },
-      { cls: 'k4', icon: 'alert', trend: '2 active',  trendCls: 'dn', val: '5',  unit: 'today',   lab: 'Alerts & events' },
+      { cls: 'k4', icon: 'alert', trend: '2 active',  trendCls: 'dn', val: '5',  unit: 'today',     lab: 'Alerts & events' },
     ],
     zones: [
-      { id: 'C1', name: 'Corner-1', meta: 'meta', on: true,  dim: 50,  tag: 'AUTO' },
-      { id: 'C2', name: 'Corner-2', meta: 'meta', on: true,  dim: 15,  tag: 'AUTO' },
-      { id: 'C3', name: 'Corner-3', meta: 'Neta', on: false, dim: 0,   tag: 'OFF' },
-      { id: 'C4', name: 'Corner-4', meta: 'meta', on: false, dim: 0,   tag: 'OFF' },
+      { id: 'C1', name: 'Corner-1', meta: 'meta', on: true,  dim: 50, tag: 'AUTO' },
+      { id: 'C2', name: 'Corner-2', meta: 'meta', on: true,  dim: 15, tag: 'AUTO' },
+      { id: 'C3', name: 'Corner-3', meta: 'Neta', on: false, dim: 0,  tag: 'OFF'  },
+      { id: 'C4', name: 'Corner-4', meta: 'meta', on: false, dim: 0,  tag: 'OFF'  },
     ],
     sensorLux: '610',
     sensorDecision: 'Dimming → 50%',
@@ -71,16 +82,16 @@ const ROOM_DATA = {
     title: 'Room 212 — Lighting Overview',
     desc: 'West wing classroom with afternoon sun exposure',
     kpis: [
-      { cls: 'k1', icon: 'sun',   trend: 'BRIGHT',   trendCls: 'up', val: '920', unit: 'lux',     lab: 'Ambient brightness (LDR)' },
-      { cls: 'k2', icon: 'users', trend: 'OCCUPIED',  trendCls: 'up', val: '31',  unit: 'present', lab: 'Occupancy (PIR motion)' },
+      { cls: 'k1', icon: 'sun',   trend: 'BRIGHT',   trendCls: 'up', val: '920', unit: 'lux',       lab: 'Ambient brightness (LDR)' },
+      { cls: 'k2', icon: 'users', trend: 'OCCUPIED',  trendCls: 'up', val: '31',  unit: 'present',   lab: 'Occupancy (PIR motion)' },
       { cls: 'k3', icon: 'zap',   trend: '↓ 61%',    trendCls: 'up', val: '8.8', unit: 'kWh saved', lab: 'Energy saved today' },
-      { cls: 'k4', icon: 'alert', trend: '0 active',  trendCls: 'up', val: '0',  unit: 'today',   lab: 'Alerts & events' },
+      { cls: 'k4', icon: 'alert', trend: '0 active',  trendCls: 'up', val: '0',  unit: 'today',     lab: 'Alerts & events' },
     ],
     zones: [
-      { id: 'zA', name: 'Zone A — Front',    meta: 'High daylight · heavily dimmed',    on: true,  dim: 15,  tag: 'AUTO' },
-      { id: 'zB', name: 'Zone B — Rear',     meta: 'Good daylight · moderately dimmed', on: true,  dim: 30,  tag: 'AUTO' },
-      { id: 'zH', name: 'Hallway',            meta: 'Occupied · auto-level',             on: true,  dim: 60,  tag: 'AUTO' },
-      { id: 'zC', name: 'Zone C — Window',   meta: 'Direct sun · deep dimming',          on: true,  dim: 10,  tag: 'AUTO' },
+      { id: 'zA', name: 'Zone A — Front',  meta: 'High daylight · heavily dimmed',    on: true, dim: 15, tag: 'AUTO' },
+      { id: 'zB', name: 'Zone B — Rear',   meta: 'Good daylight · moderately dimmed', on: true, dim: 30, tag: 'AUTO' },
+      { id: 'zH', name: 'Hallway',         meta: 'Occupied · auto-level',             on: true, dim: 60, tag: 'AUTO' },
+      { id: 'zC', name: 'Zone C — Window', meta: 'Direct sun · deep dimming',         on: true, dim: 10, tag: 'AUTO' },
     ],
     sensorLux: '920',
     sensorDecision: 'Dimming → 15%',
@@ -90,16 +101,16 @@ const ROOM_DATA = {
     title: 'Room 408 — Lighting Overview',
     desc: 'Admin office on top floor with skylight access',
     kpis: [
-      { cls: 'k1', icon: 'sun',   trend: 'DAYLIGHT', trendCls: 'up', val: '540', unit: 'lux',     lab: 'Ambient brightness (LDR)' },
-      { cls: 'k2', icon: 'users', trend: 'LOW OCC',   trendCls: 'dn', val: '4',   unit: 'present', lab: 'Occupancy (PIR motion)' },
+      { cls: 'k1', icon: 'sun',   trend: 'DAYLIGHT', trendCls: 'up', val: '540', unit: 'lux',       lab: 'Ambient brightness (LDR)' },
+      { cls: 'k2', icon: 'users', trend: 'LOW OCC',   trendCls: 'dn', val: '4',   unit: 'present',   lab: 'Occupancy (PIR motion)' },
       { cls: 'k3', icon: 'zap',   trend: '↓ 53%',    trendCls: 'up', val: '5.4', unit: 'kWh saved', lab: 'Energy saved today' },
-      { cls: 'k4', icon: 'alert', trend: '1 active',  trendCls: 'dn', val: '2',  unit: 'today',   lab: 'Alerts & events' },
+      { cls: 'k4', icon: 'alert', trend: '1 active',  trendCls: 'dn', val: '2',  unit: 'today',     lab: 'Alerts & events' },
     ],
     zones: [
-      { id: 'zA', name: 'Zone A — Desks',    meta: 'Occupied · auto-dimmed',             on: true,  dim: 40,  tag: 'AUTO' },
-      { id: 'zB', name: 'Zone B — Meeting',  meta: 'Unoccupied · standby mode',          on: true,  dim: 10,  tag: 'AUTO' },
-      { id: 'zH', name: 'Stairwell',          meta: 'Safety light · always active',      on: true,  dim: 70,  tag: 'AUTO' },
-      { id: 'zC', name: 'Zone C — Archive',  meta: 'Low use · dimmed',                   on: true,  dim: 20,  tag: 'AUTO' },
+      { id: 'zA', name: 'Zone A — Desks',   meta: 'Occupied · auto-dimmed',        on: true, dim: 40, tag: 'AUTO' },
+      { id: 'zB', name: 'Zone B — Meeting', meta: 'Unoccupied · standby mode',     on: true, dim: 10, tag: 'AUTO' },
+      { id: 'zH', name: 'Stairwell',        meta: 'Safety light · always active',  on: true, dim: 70, tag: 'AUTO' },
+      { id: 'zC', name: 'Zone C — Archive', meta: 'Low use · dimmed',              on: true, dim: 20, tag: 'AUTO' },
     ],
     sensorLux: '540',
     sensorDecision: 'Dimming → 40%',
@@ -273,12 +284,76 @@ function useClock() {
   return time
 }
 
+// ─── MQTT HOOK ───────────────────────────────────────────────
+// Connects to the broker via WebSocket (required for browsers).
+// Returns live sensor state published by the ESP8266 and a
+// function to send zone override commands back to it.
+function useMQTT(brokerUrl) {
+  const [status, setStatus]     = useState('disconnected')
+  const [liveData, setLiveData] = useState(null)
+  const clientRef               = useRef(null)
+
+  const publishZoneCmd = useCallback((zoneIndex, on) => {
+    const client = clientRef.current
+    if (client?.connected) {
+      // on=true  → force LED on (override active)
+      // on=false → send null, which clears the override and returns zone to PIR auto
+      client.publish(
+        `lumenclass/zone/${zoneIndex}/cmd`,
+        JSON.stringify({ on: on ? true : null }),
+        { qos: 1 },
+      )
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!brokerUrl) return
+
+    const client = mqtt.connect(brokerUrl, {
+      clientId:        `lumenclass-web-${Math.random().toString(16).slice(2, 8)}`,
+      keepalive:       60,
+      reconnectPeriod: 3000,
+    })
+    clientRef.current = client
+    setStatus('connecting')
+
+    client.on('connect', () => {
+      setStatus('connected')
+      client.subscribe('lumenclass/sensor/state')
+      client.subscribe('lumenclass/status')
+    })
+
+    client.on('message', (topic, message) => {
+      if (topic === 'lumenclass/sensor/state') {
+        try { setLiveData(JSON.parse(message.toString())) } catch {}
+      }
+    })
+
+    client.on('reconnect', () => setStatus('connecting'))
+    client.on('error',     () => setStatus('error'))
+    client.on('offline',   () => setStatus('disconnected'))
+    client.on('close',     () => setStatus('disconnected'))
+
+    return () => { client.end() }
+  }, [brokerUrl])
+
+  return { status, liveData, publishZoneCmd }
+}
+
 // ─── ZONE CARD ───────────────────────────────────────────────
-function ZoneCard({ zone }) {
-  const [on, setOn] = useState(zone.on)
+// onToggle(newOn) — optional; when provided the toggle publishes
+// an MQTT override command instead of only updating local state.
+function ZoneCard({ zone, onToggle }) {
+  const [on, setOn]   = useState(zone.on)
   const [dim, setDim] = useState(zone.dim)
 
   useEffect(() => { setOn(zone.on); setDim(zone.dim) }, [zone])
+
+  const handleToggle = () => {
+    const next = !on
+    setOn(next)
+    onToggle?.(next)
+  }
 
   return (
     <div className={`zone ${on ? 'on' : ''}`}>
@@ -291,7 +366,7 @@ function ZoneCard({ zone }) {
           </span>
           {zone.name}
         </div>
-        <button className={`toggle-switch ${on ? 'on' : ''}`} onClick={() => setOn(v => !v)} />
+        <button className={`toggle-switch ${on ? 'on' : ''}`} onClick={handleToggle} />
       </div>
       <div className="zmeta">{zone.meta}</div>
       <div className="dim-row">
@@ -299,23 +374,197 @@ function ZoneCard({ zone }) {
         <div className="bar">
           <div className="bar-fill" style={{ width: on ? `${dim}%` : '0%' }} />
         </div>
-        {on
-          ? <span className="auto-tag">{zone.tag}</span>
-          : <span className="off-tag">OFF</span>
+        {zone.tag === 'OFF'
+          ? <span className="off-tag">OFF</span>
+          : <span className="auto-tag">{zone.tag}</span>
         }
       </div>
     </div>
   )
 }
 
-// ─── CHART SVG ───────────────────────────────────────────────
-function DaylightChart() {
+// ─── CHART HISTORY HOOK ──────────────────────────────────────
+// Accumulates a rolling MAX_BUCKETS-point history from live MQTT data.
+// seed (optional): pre-populated buckets from Supabase to fill history on load.
+function useChartHistory(liveData, seed) {
+  const histRef   = useRef([])
+  const seededRef = useRef(false)
+  const [snap, setSnap] = useState([])
+
+  // Apply seed exactly once when it arrives
+  useEffect(() => {
+    if (!seed || seededRef.current) return
+    seededRef.current = true
+    histRef.current = seed.slice()
+    setSnap(seed.slice())
+  }, [seed])
+
+  useEffect(() => {
+    if (!liveData) return
+    const id   = Math.floor(Date.now() / BUCKET_MS)
+    const h    = histRef.current
+    const last = h[h.length - 1]
+    if (last?.id === id) {
+      last.lux  = (last.lux  * last.n + liveData.lux)  / (last.n + 1)
+      last.duty = (last.duty * last.n + liveData.duty) / (last.n + 1)
+      last.n++
+    } else {
+      h.push({ id, lux: liveData.lux, duty: liveData.duty, n: 1 })
+      if (h.length > MAX_BUCKETS) h.shift()
+    }
+    setSnap(h.slice())
+  }, [liveData])
+
+  return snap
+}
+
+// ─── SUPABASE: CHART SEED ────────────────────────────────────
+// Fetches the last 10 min of sensor_readings and converts them to chart buckets.
+function useSupabaseSeed() {
+  const [seed, setSeed] = useState(null)
+
+  useEffect(() => {
+    if (!supabase) return
+    const since = new Date(Date.now() - MAX_BUCKETS * BUCKET_MS).toISOString()
+    supabase
+      .from('sensor_readings')
+      .select('lux, duty, inserted_at')
+      .gte('inserted_at', since)
+      .order('inserted_at', { ascending: true })
+      .then(({ data }) => {
+        if (!data?.length) return
+        const buckets = []
+        for (const row of data) {
+          const id   = Math.floor(new Date(row.inserted_at).getTime() / BUCKET_MS)
+          const last = buckets[buckets.length - 1]
+          if (last?.id === id) {
+            last.lux  = (last.lux  * last.n + row.lux)  / (last.n + 1)
+            last.duty = (last.duty * last.n + row.duty) / (last.n + 1)
+            last.n++
+          } else {
+            buckets.push({ id, lux: row.lux, duty: row.duty, n: 1 })
+          }
+        }
+        setSeed(buckets.slice(-MAX_BUCKETS))
+      })
+  }, [])
+
+  return seed
+}
+
+// ─── SUPABASE: ALERTS ────────────────────────────────────────
+const ALERT_ICON   = { ok: 'check', info: 'info', warn: 'warn', error: 'warn' }
+const FALLBACK_ALERTS = [
+  { id: 1, type: 'ok',   title: 'Zone A auto-dimmed to 35%',           body: 'Daylight crossed 700 lux — ESP8266 reduced output locally.',           inserted_at: null },
+  { id: 2, type: 'info', title: 'Hallway light switched OFF',           body: 'No occupancy detected for 12 minutes — local automation turned off.',  inserted_at: null },
+  { id: 3, type: 'warn', title: 'Brief connectivity drop — handled',    body: 'Internet lost 47s. Lighting responded locally; synced on reconnect.',  inserted_at: null },
+]
+
+function formatAlertTime(iso) {
+  if (!iso) return ''
+  const d  = new Date(iso)
+  let h    = d.getHours(), m = d.getMinutes()
+  const ap = h >= 12 ? 'PM' : 'AM'
+  h = h % 12 || 12
+  return `${h}:${String(m).padStart(2, '0')} ${ap}`
+}
+
+// Fetches recent alerts from Supabase and subscribes to new inserts in realtime.
+// Falls back to FALLBACK_ALERTS when Supabase is not configured.
+function useAlerts() {
+  const [rows, setRows] = useState(supabase ? [] : FALLBACK_ALERTS)
+
+  useEffect(() => {
+    if (!supabase) return
+
+    supabase
+      .from('alerts')
+      .select('*')
+      .order('inserted_at', { ascending: false })
+      .limit(20)
+      .then(({ data }) => { if (data?.length) setRows(data) })
+
+    const channel = supabase
+      .channel('alerts-realtime')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'alerts' },
+        payload => setRows(prev => [payload.new, ...prev].slice(0, 20))
+      )
+      .subscribe()
+
+    return () => supabase.removeChannel(channel)
+  }, [])
+
+  return rows
+}
+
+// ─── EDGE PILL ───────────────────────────────────────────────
+function EdgePill({ isLive, edgeLabel, edgeSub }) {
   return (
-    <svg className="chart" viewBox="0 0 620 210" preserveAspectRatio="none">
-      <line className="gridline" x1="0" y1="20"  x2="620" y2="20"/>
-      <line className="gridline" x1="0" y1="65"  x2="620" y2="65"/>
-      <line className="gridline" x1="0" y1="110" x2="620" y2="110"/>
-      <line className="gridline" x1="0" y1="155" x2="620" y2="155"/>
+    <div className="edge-pill">
+      <span className={`dot ${isLive ? 'live' : ''}`} />
+      <div className="edge-pill-text">
+        <b>{edgeLabel}</b>
+        <small>{edgeSub}</small>
+      </div>
+    </div>
+  )
+}
+
+// ─── CHART HELPERS ───────────────────────────────────────────
+const CW = 620, CH = 210, CY_TOP = 20, CY_BOT = 190
+
+function toY(value, maxVal) {
+  return CY_BOT - Math.min(value / maxVal, 1) * (CY_BOT - CY_TOP)
+}
+
+function buildLinePath(history, getValue, maxVal) {
+  if (history.length < 2) return null
+  const bw = CW / MAX_BUCKETS
+  return history.map((b, i) => {
+    const age = history.length - 1 - i
+    const x   = (CW - age * bw).toFixed(1)
+    const y   = toY(getValue(b), maxVal).toFixed(1)
+    return `${i === 0 ? 'M' : 'L'}${x},${y}`
+  }).join(' ')
+}
+
+function buildFillPath(linePath, firstX) {
+  return `${linePath} L${CW},${CY_BOT} L${firstX.toFixed(1)},${CY_BOT} Z`
+}
+
+// ─── CHART SVG ───────────────────────────────────────────────
+// history: array of { lux, duty } bucket objects (from useChartHistory).
+// Falls back to a dimmed static illustration when history is empty.
+function DaylightChart({ history }) {
+  const hasData  = history.length >= 2
+  const bw       = CW / MAX_BUCKETS
+  const firstX   = CW - (history.length - 1) * bw
+
+  const luxPath  = hasData ? buildLinePath(history, b => b.lux,  1000) : null
+  const dutyPath = hasData ? buildLinePath(history, b => b.duty, 1023) : null
+  const luxFill  = luxPath  ? buildFillPath(luxPath,  firstX) : null
+  const dutyFill = dutyPath ? buildFillPath(dutyPath, firstX) : null
+
+  const last     = history[history.length - 1]
+  const luxDotY  = last ? toY(last.lux,  1000) : null
+  const dutyDotY = last ? toY(last.duty, 1023) : null
+
+  // Axis labels: 5 evenly spaced clock times across the 10-min window
+  const now = Date.now()
+  const axisLabels = [0, 0.25, 0.5, 0.75, 1].map(frac => {
+    const t  = new Date(now - (1 - frac) * MAX_BUCKETS * BUCKET_MS)
+    const h  = t.getHours() % 12 || 12
+    const m  = String(t.getMinutes()).padStart(2, '0')
+    const ap = t.getHours() >= 12 ? 'PM' : 'AM'
+    return { x: frac * CW, label: `${h}:${m} ${ap}` }
+  })
+
+  return (
+    <svg className="chart" viewBox={`0 0 ${CW} ${CH}`} preserveAspectRatio="none">
+      <line className="gridline" x1="0" y1="20"  x2={CW} y2="20"/>
+      <line className="gridline" x1="0" y1="65"  x2={CW} y2="65"/>
+      <line className="gridline" x1="0" y1="110" x2={CW} y2="110"/>
+      <line className="gridline" x1="0" y1="155" x2={CW} y2="155"/>
       <defs>
         <linearGradient id="gAmber" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor="#F2A310" stopOpacity="0.28"/>
@@ -326,36 +575,115 @@ function DaylightChart() {
           <stop offset="100%" stopColor="#1FB6A6" stopOpacity="0"/>
         </linearGradient>
       </defs>
-      {/* Daylight fill */}
-      <path d="M0,170 C70,160 90,70 150,46 C210,24 250,20 310,30 C370,40 420,80 470,120 C520,158 570,168 620,172 L620,210 L0,210 Z" fill="url(#gAmber)"/>
-      <path d="M0,170 C70,160 90,70 150,46 C210,24 250,20 310,30 C370,40 420,80 470,120 C520,158 570,168 620,172" fill="none" stroke="#F2A310" strokeWidth="2.5" strokeLinecap="round"/>
-      {/* Light output fill */}
-      <path d="M0,55 C70,60 90,135 150,150 C210,162 250,165 310,158 C370,150 420,120 470,92 C520,64 570,56 620,52 L620,210 L0,210 Z" fill="url(#gTeal)"/>
-      <path d="M0,55 C70,60 90,135 150,150 C210,162 250,165 310,158 C370,150 420,120 470,92 C520,64 570,56 620,52" fill="none" stroke="#1FB6A6" strokeWidth="2.5" strokeLinecap="round"/>
-      {/* Dots */}
-      <circle cx="310" cy="30" r="4" fill="#F2A310"/>
-      <circle cx="310" cy="158" r="4" fill="#1FB6A6"/>
-      {/* Axis labels */}
-      <text className="axis-lab" x="2"   y="205">6AM</text>
-      <text className="axis-lab" x="148" y="205">9AM</text>
-      <text className="axis-lab" x="298" y="205">12PM</text>
-      <text className="axis-lab" x="448" y="205">3PM</text>
-      <text className="axis-lab" x="590" y="205">6PM</text>
+
+      {hasData ? (
+        <>
+          {luxFill  && <path d={luxFill}  fill="url(#gAmber)"/>}
+          {luxPath  && <path d={luxPath}  fill="none" stroke="#F2A310" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>}
+          {dutyFill && <path d={dutyFill} fill="url(#gTeal)"/>}
+          {dutyPath && <path d={dutyPath} fill="none" stroke="#1FB6A6" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>}
+          <circle cx={CW} cy={luxDotY}  r="4" fill="#F2A310"/>
+          <circle cx={CW} cy={dutyDotY} r="4" fill="#1FB6A6"/>
+        </>
+      ) : (
+        // Dimmed static illustration shown before live data arrives
+        <>
+          <path d="M0,170 C70,160 90,70 150,46 C210,24 250,20 310,30 C370,40 420,80 470,120 C520,158 570,168 620,172 L620,210 L0,210 Z" fill="url(#gAmber)" opacity="0.35"/>
+          <path d="M0,170 C70,160 90,70 150,46 C210,24 250,20 310,30 C370,40 420,80 470,120 C520,158 570,168 620,172" fill="none" stroke="#F2A310" strokeWidth="2.5" strokeLinecap="round" opacity="0.35"/>
+          <path d="M0,55 C70,60 90,135 150,150 C210,162 250,165 310,158 C370,150 420,120 470,92 C520,64 570,56 620,52 L620,210 L0,210 Z" fill="url(#gTeal)" opacity="0.35"/>
+          <path d="M0,55 C70,60 90,135 150,150 C210,162 250,165 310,158 C370,150 420,120 470,92 C520,64 570,56 620,52" fill="none" stroke="#1FB6A6" strokeWidth="2.5" strokeLinecap="round" opacity="0.35"/>
+          <text className="axis-lab" x={CW / 2} y={CH / 2 + 4} textAnchor="middle" style={{ fontSize: 11 }}>
+            Waiting for live data…
+          </text>
+        </>
+      )}
+
+      {axisLabels.map(({ x, label }, i) => (
+        <text
+          key={i}
+          className="axis-lab"
+          x={x === 0 ? 2 : x === CW ? CW - 2 : x}
+          y="205"
+          textAnchor={x === 0 ? 'start' : x === CW ? 'end' : 'middle'}
+        >
+          {label}
+        </text>
+      ))}
     </svg>
   )
 }
 
 // ─── MAIN APP ────────────────────────────────────────────────
 export default function App() {
-  const [dark, setDark] = useState(false)
-  const [activeNav, setActiveNav] = useState('Dashboard')
-  const [selectedRoom, setSelectedRoom] = useState(ROOMS[0])
-  const [dropOpen, setDropOpen] = useState(false)
+  const [dark, setDark]                   = useState(false)
+  const [activeNav, setActiveNav]         = useState('Dashboard')
+  const [selectedRoom, setSelectedRoom]   = useState(ROOMS[0])
+  const [dropOpen, setDropOpen]           = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const dropRef = useRef(null)
-  const clock = useClock()
+  const clock   = useClock()
 
-  const data = ROOM_DATA[selectedRoom.id]
+  const { status: mqttStatus, liveData, publishZoneCmd } = useMQTT(MQTT_BROKER_URL)
+  const chartSeed    = useSupabaseSeed()
+  const chartHistory = useChartHistory(selectedRoom.id === 'r204' ? liveData : null, chartSeed)
+  const alertRows    = useAlerts()
+
+  // Stale detection: MQTT says connected but no data for >30 s
+  const lastDataTsRef = useRef(0)
+  const [isStale, setIsStale] = useState(false)
+  useEffect(() => {
+    if (liveData) { lastDataTsRef.current = Date.now(); setIsStale(false) }
+  }, [liveData])
+  useEffect(() => {
+    if (mqttStatus !== 'connected') { setIsStale(false); return }
+    const id = setInterval(() => {
+      setIsStale(lastDataTsRef.current > 0 && Date.now() - lastDataTsRef.current > 30_000)
+    }, 5000)
+    return () => clearInterval(id)
+  }, [mqttStatus])
+
+  // Merge live ESP8266 data into r204; all other rooms stay static.
+  const data = useMemo(() => {
+    const base = ROOM_DATA[selectedRoom.id]
+    if (selectedRoom.id !== 'r204' || !liveData) return base
+
+    const dimPct = Math.round((liveData.duty / 1023) * 100)
+
+    const kpis = base.kpis.map(k => {
+      if (k.icon === 'sun') {
+        return { ...k, val: String(liveData.lux ?? k.val), trend: 'DAYLIGHT' }
+      }
+      if (k.icon === 'users') {
+        const occ = liveData.occupancy ?? 0
+        return { ...k, val: String(occ), trend: occ > 0 ? 'OCCUPIED' : 'VACANT', trendCls: occ > 0 ? 'up' : 'dn' }
+      }
+      return k
+    })
+
+    const zones = base.zones.map((z, i) => {
+      const lz = liveData.zones?.[i]
+      if (!lz) return z
+      const meta = lz.override
+        ? 'Manual ON · PIR bypassed'
+        : lz.on ? 'Motion detected · auto' : 'No motion · standby'
+      return { ...z, on: lz.on, dim: lz.on ? dimPct : 0, tag: lz.override ? 'MANUAL' : 'AUTO', meta }
+    })
+
+    return {
+      ...base,
+      kpis,
+      zones,
+      sensorLux:          String(liveData.lux ?? base.sensorLux),
+      sensorDecision:     liveData.occupancy > 0 ? `Dimming → ${dimPct}%` : 'OFF',
+      sensorDecisionNote: liveData.occupancy > 0 ? 'Occupancy detected · auto-brightness active' : 'No motion detected',
+    }
+  }, [selectedRoom.id, liveData])
+
+  // Connection status labels for edge pill and cloud chip
+  const isLive    = mqttStatus === 'connected'
+  const edgeLabel = { connected: 'Edge node online', connecting: 'Connecting…', disconnected: 'Edge node offline', error: 'Connection error' }[mqttStatus] || 'Edge node offline'
+  const edgeSub   = isStale ? 'ESP8266 · data may be stale' : isLive ? 'ESP8266 · live data active' : 'ESP8266 · local control active'
+  const chipLabel = isStale ? 'Stale' : isLive ? 'Live' : mqttStatus === 'connecting' ? 'Connecting…' : 'Offline'
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -366,54 +694,31 @@ export default function App() {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  // Close mobile menu when nav item clicked
-  const handleNavClick = (label) => {
+  const handleNavClick = label => {
     setActiveNav(label)
     setMobileMenuOpen(false)
   }
 
-  // Manage body scroll when mobile menu is open
   useEffect(() => {
-    if (mobileMenuOpen) {
-      document.body.style.overflow = 'hidden'
-    } else {
-      document.body.style.overflow = ''
-    }
-    return () => {
-      document.body.style.overflow = ''
-    }
+    document.body.style.overflow = mobileMenuOpen ? 'hidden' : ''
+    return () => { document.body.style.overflow = '' }
   }, [mobileMenuOpen])
 
   const navItems = [
     { section: 'Monitor', items: [
       { label: 'Dashboard', icon: 'dashboard' },
-      { label: 'Alerts', icon: 'shield' },
+      { label: 'Alerts',    icon: 'shield'    },
     ]}
   ]
 
-  const alertItems = [
-    {
-      type: 'ok',
-      icon: 'check',
-      title: `Zone A auto-dimmed to ${data.zones[0]?.dim ?? 35}%`,
-      body: 'Daylight crossed 700 lux — ESP32 reduced output locally to save energy.',
-      time: '10:41 AM',
-    },
-    {
-      type: 'info',
-      icon: 'info',
-      title: 'Hallway light switched OFF',
-      body: 'No occupancy detected for 12 minutes — local automation turned the zone off.',
-      time: '10:29 AM',
-    },
-    {
-      type: 'warn',
-      icon: 'warn',
-      title: 'Brief connectivity drop — handled offline',
-      body: 'Internet lost for 47s. Lighting kept responding locally; readings buffered and synced on reconnect.',
-      time: '09:58 AM',
-    },
-  ]
+  const alertItems = alertRows.map(row => ({
+    id:   row.id,
+    type: row.type,
+    icon: ALERT_ICON[row.type] ?? 'info',
+    title: row.title,
+    body:  row.body,
+    time:  formatAlertTime(row.inserted_at),
+  }))
 
   const pageMeta = activeNav === 'Alerts'
     ? { title: 'Alerts Center', desc: 'All device events, warnings, and activity stream' }
@@ -464,13 +769,7 @@ export default function App() {
                 </div>
 
                 <div className="mobile-menu-footer">
-                  <div className="edge-pill">
-                    <span className="dot live" />
-                    <div className="edge-pill-text">
-                      <b>Edge node online</b>
-                      <small>ESP32 · local control active</small>
-                    </div>
-                  </div>
+                  <EdgePill isLive={isLive} edgeLabel={edgeLabel} edgeSub={edgeSub} />
                 </div>
               </div>
             </div>
@@ -478,7 +777,6 @@ export default function App() {
 
           {/* ── SIDEBAR ── */}
           <aside className="side">
-            {/* Brand */}
             <div className="brand">
               <div className="brand-mark">
                 <svg viewBox="0 0 24 24" fill="none" width="21" height="21">
@@ -491,7 +789,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Nav */}
             {navItems.map(group => (
               <div key={group.section} style={{ position: 'relative', zIndex: 1 }}>
                 <div className="nav-label">{group.section}</div>
@@ -508,15 +805,8 @@ export default function App() {
               </div>
             ))}
 
-            {/* Footer */}
             <div className="side-foot">
-              <div className="edge-pill">
-                <span className="dot live" />
-                <div className="edge-pill-text">
-                  <b>Edge node online</b>
-                  <small>ESP32 · local control active</small>
-                </div>
-              </div>
+              <EdgePill />
             </div>
           </aside>
 
@@ -564,10 +854,10 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Cloud synced */}
-                <div className="chip online">
+                {/* Live / offline chip */}
+                <div className={`chip ${isLive ? 'online' : ''}`}>
                   <Icon name="cloudCheck" style={{ width: 13, height: 13 }} />
-                  Cloud synced
+                  {chipLabel}
                 </div>
 
                 {/* Clock */}
@@ -580,7 +870,7 @@ export default function App() {
                 <button className="dark-toggle" onClick={() => setDark(v => !v)} title="Toggle dark mode">
                   {dark
                     ? <Icon name="sunSmall" style={{ width: 16, height: 16 }} />
-                    : <Icon name="moon" style={{ width: 16, height: 16 }} />
+                    : <Icon name="moon"     style={{ width: 16, height: 16 }} />
                   }
                 </button>
               </div>
@@ -608,7 +898,7 @@ export default function App() {
                     <div className="card-h">
                       <div>
                         <h3>Daylight vs. Lighting Output</h3>
-                        <span className="sub">Last 12 hours · auto-dimming response</span>
+                        <span className="sub">{chartHistory.length > 0 ? 'Last 10 min · live MQTT data' : 'Last 12 hours · auto-dimming response'}</span>
                       </div>
                       <div className="legend">
                         <span className="legend-item">
@@ -622,7 +912,7 @@ export default function App() {
                       </div>
                     </div>
                     <div className="chart-wrap">
-                      <DaylightChart />
+                      <DaylightChart history={chartHistory} />
                     </div>
                     <div className="sensors">
                       <div className="sensor">
@@ -659,8 +949,12 @@ export default function App() {
                       </div>
                     </div>
                     <div className="zones">
-                      {data.zones.map(zone => (
-                        <ZoneCard key={zone.id + selectedRoom.id} zone={zone} />
+                      {data.zones.map((zone, i) => (
+                        <ZoneCard
+                          key={zone.id + selectedRoom.id}
+                          zone={zone}
+                          onToggle={selectedRoom.id === 'r204' ? on => publishZoneCmd(i, on) : undefined}
+                        />
                       ))}
                     </div>
                   </div>
@@ -677,8 +971,8 @@ export default function App() {
                       </button>
                     </div>
                     <div className="alerts">
-                      {alertItems.map((alert, i) => (
-                        <div key={`${alert.type}-${i}`} className={`alert ${alert.type}`}>
+                      {alertItems.map(alert => (
+                        <div key={alert.id} className={`alert ${alert.type}`}>
                           <div className="ad"><Icon name={alert.icon} stroke={alert.type === 'ok' ? 'var(--good)' : undefined} /></div>
                           <div>
                             <b>{alert.title}</b>
@@ -700,7 +994,7 @@ export default function App() {
                     </div>
                     <div>
                       <b>Edge-first by design</b>
-                      <p>All threshold decisions, dimming, and on/off switching run on the ESP32. This dashboard adds visibility, history, and remote control on top — the lighting keeps working even with no internet.</p>
+                      <p>All threshold decisions, dimming, and on/off switching run on the ESP8266. This dashboard adds visibility, history, and remote control on top — the lighting keeps working even with no internet.</p>
                     </div>
                   </div>
 
@@ -718,8 +1012,8 @@ export default function App() {
                     </div>
                   </div>
                   <div className="alerts">
-                    {alertItems.map((alert, i) => (
-                      <div key={`page-${alert.type}-${i}`} className={`alert ${alert.type}`}>
+                    {alertItems.map(alert => (
+                      <div key={`page-${alert.id}`} className={`alert ${alert.type}`}>
                         <div className="ad"><Icon name={alert.icon} stroke={alert.type === 'ok' ? 'var(--good)' : undefined} /></div>
                         <div>
                           <b>{alert.title}</b>
