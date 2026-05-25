@@ -4,7 +4,7 @@ import './App.css'
 import { supabase } from './supabase.js'
 
 // ─── MQTT BROKER URL ─────────────────────────────────────────
-// Set VITE_MQTT_BROKER_URL in .env (e.g. ws://192.168.1.100:9001)
+// Set VITE_MQTT_BROKER_URL in .env (e.g. ws://localhost:9001)
 const MQTT_BROKER_URL = import.meta.env.VITE_MQTT_BROKER_URL || ''
 
 // ─── CHART HISTORY SETTINGS ──────────────────────────────────
@@ -31,10 +31,10 @@ const ROOM_DATA = {
       { cls: 'k3', icon: 'alert', trend: '1 active', trendCls: 'dn', val: '3',  unit: 'today',   lab: 'Alerts & events' },
     ],
     zones: [
-      { id: 'zA', name: 'Zone A — Front',  meta: 'PIR zone 0',  on: false, dim: 0,  tag: 'AUTO' },
-      { id: 'zB', name: 'Zone B — Rear',   meta: 'PIR zone 1',  on: false, dim: 0,  tag: 'AUTO' },
-      { id: 'zH', name: 'Hallway light',   meta: 'PIR zone 2',  on: false, dim: 0,  tag: 'AUTO' },
-      { id: 'zC', name: 'Zone C — Window', meta: 'PIR zone 3',  on: false, dim: 0,  tag: 'AUTO' },
+      { id: 'zA', name: 'Front — Left Corner',  meta: 'PIR zone 1',  on: false, dim: 0,  tag: 'AUTO' },
+      { id: 'zB', name: 'Front — Right Corner',   meta: 'PIR zone 2',  on: false, dim: 0,  tag: 'AUTO' },
+      { id: 'zH', name: 'Back — Right Corner',   meta: 'PIR zone 3',  on: false, dim: 0,  tag: 'AUTO' },
+      { id: 'zC', name: 'Back — Left Corner', meta: 'PIR zone 4',  on: false, dim: 0,  tag: 'AUTO' },
     ],
     sensorLux: '—',
     sensorDecision: '—',
@@ -237,9 +237,9 @@ const Icon = ({ name, ...props }) => {
         <path d="M12 7v5l3 2" strokeLinecap="round"/>
       </svg>
     ),
-    cloudCheck: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" {...props}>
-        <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round"/>
+    cloud: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" {...props}>
+        <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" strokeLinecap="round" strokeLinejoin="round"/>
       </svg>
     ),
     roomPin: (
@@ -289,9 +289,10 @@ function useClock() {
 // Returns live sensor state published by the ESP8266 and a
 // function to send zone override commands back to it.
 function useMQTT(brokerUrl) {
-  const [status, setStatus]     = useState('disconnected')
-  const [liveData, setLiveData] = useState(null)
-  const clientRef               = useRef(null)
+  const [status, setStatus]         = useState('disconnected')
+  const [liveData, setLiveData]     = useState(null)
+  const [espStatus, setEspStatus]   = useState(null) // 'online' | 'offline' | null (unknown)
+  const clientRef                   = useRef(null)
 
   const publishZoneCmd = useCallback((zoneIndex, on) => {
     const client = clientRef.current
@@ -326,9 +327,14 @@ function useMQTT(brokerUrl) {
     client.on('message', (topic, message) => {
       if (topic === 'lumenclass/sensor/state') {
         try { setLiveData(JSON.parse(message.toString())) } catch {}
+      } else if (topic === 'lumenclass/status') {
+        const s = message.toString()
+        if (s === 'online' || s === 'offline') setEspStatus(s)
       }
     })
 
+    // Browser WebSocket events — do NOT reset espStatus here.
+    // The ESP8266's broker connection is independent of the browser's connection.
     client.on('reconnect', () => setStatus('connecting'))
     client.on('error',     () => setStatus('error'))
     client.on('offline',   () => setStatus('disconnected'))
@@ -337,7 +343,7 @@ function useMQTT(brokerUrl) {
     return () => { client.end() }
   }, [brokerUrl])
 
-  return { status, liveData, publishZoneCmd }
+  return { status, liveData, espStatus, publishZoneCmd }
 }
 
 // ─── ZONE CARD ───────────────────────────────────────────────
@@ -386,18 +392,9 @@ function ZoneCard({ zone, onToggle }) {
 // ─── CHART HISTORY HOOK ──────────────────────────────────────
 // Accumulates a rolling MAX_BUCKETS-point history from live MQTT data.
 // seed (optional): pre-populated buckets from Supabase to fill history on load.
-function useChartHistory(liveData, seed) {
-  const histRef   = useRef([])
-  const seededRef = useRef(false)
+function useChartHistory(liveData) {
+  const histRef = useRef([])
   const [snap, setSnap] = useState([])
-
-  // Apply seed exactly once when it arrives
-  useEffect(() => {
-    if (!seed || seededRef.current) return
-    seededRef.current = true
-    histRef.current = seed.slice()
-    setSnap(seed.slice())
-  }, [seed])
 
   useEffect(() => {
     if (!liveData) return
@@ -418,39 +415,6 @@ function useChartHistory(liveData, seed) {
   return snap
 }
 
-// ─── SUPABASE: CHART SEED ────────────────────────────────────
-// Fetches the last 10 min of sensor_readings and converts them to chart buckets.
-function useSupabaseSeed() {
-  const [seed, setSeed] = useState(null)
-
-  useEffect(() => {
-    if (!supabase) return
-    const since = new Date(Date.now() - MAX_BUCKETS * BUCKET_MS).toISOString()
-    supabase
-      .from('sensor_readings')
-      .select('lux, duty, inserted_at')
-      .gte('inserted_at', since)
-      .order('inserted_at', { ascending: true })
-      .then(({ data }) => {
-        if (!data?.length) return
-        const buckets = []
-        for (const row of data) {
-          const id   = Math.floor(new Date(row.inserted_at).getTime() / BUCKET_MS)
-          const last = buckets[buckets.length - 1]
-          if (last?.id === id) {
-            last.lux  = (last.lux  * last.n + row.lux)  / (last.n + 1)
-            last.duty = (last.duty * last.n + row.duty) / (last.n + 1)
-            last.n++
-          } else {
-            buckets.push({ id, lux: row.lux, duty: row.duty, n: 1 })
-          }
-        }
-        setSeed(buckets.slice(-MAX_BUCKETS))
-      })
-  }, [])
-
-  return seed
-}
 
 // ─── SUPABASE: ALERTS ────────────────────────────────────────
 const ALERT_ICON   = { ok: 'check', info: 'info', warn: 'warn', error: 'warn' }
@@ -471,25 +435,32 @@ function formatAlertTime(iso) {
 
 // Fetches recent alerts from Supabase and subscribes to new inserts in realtime.
 // Falls back to FALLBACK_ALERTS when Supabase is not configured.
+// Re-fetches the full list every time the channel (re)subscribes so that events
+// flushed by the bridge during a downtime period are never missed.
 function useAlerts() {
   const [rows, setRows] = useState(supabase ? [] : FALLBACK_ALERTS)
 
   useEffect(() => {
     if (!supabase) return
 
-    supabase
-      .from('alerts')
-      .select('*')
-      .order('inserted_at', { ascending: false })
-      .limit(20)
-      .then(({ data }) => { if (data?.length) setRows(data) })
+    async function fetchAll() {
+      const { data } = await supabase
+        .from('alerts')
+        .select('*')
+        .order('inserted_at', { ascending: false })
+        .limit(200)
+      if (data?.length) setRows(data)
+    }
 
     const channel = supabase
       .channel('alerts-realtime')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'alerts' },
-        payload => setRows(prev => [payload.new, ...prev].slice(0, 20))
+        payload => setRows(prev => [payload.new, ...prev].slice(0, 200))
       )
-      .subscribe()
+      .subscribe(status => {
+        // Fires on initial connect AND every reconnect — catches events missed during downtime
+        if (status === 'SUBSCRIBED') fetchAll()
+      })
 
     return () => supabase.removeChannel(channel)
   }, [])
@@ -497,14 +468,31 @@ function useAlerts() {
   return rows
 }
 
+// ─── SUPABASE: CONNECTION STATUS ─────────────────────────────
+function useSupabaseStatus() {
+  const [status, setStatus] = useState(supabase ? 'connecting' : 'disconnected')
+
+  useEffect(() => {
+    if (!supabase) return
+    const channel = supabase
+      .channel('_status_probe')
+      .subscribe(s => {
+        if (s === 'SUBSCRIBED')     setStatus('connected')
+        else if (s === 'TIMED_OUT' || s === 'CHANNEL_ERROR' || s === 'CLOSED') setStatus('disconnected')
+      })
+    return () => supabase.removeChannel(channel)
+  }, [])
+
+  return status
+}
+
 // ─── EDGE PILL ───────────────────────────────────────────────
-function EdgePill({ isLive, edgeLabel, edgeSub }) {
+function EdgePill({ status, edgeLabel }) {
   return (
     <div className="edge-pill">
-      <span className={`dot ${isLive ? 'live' : ''}`} />
+      <span className={`dot dot--${status}`} />
       <div className="edge-pill-text">
         <b>{edgeLabel}</b>
-        <small>{edgeSub}</small>
       </div>
     </div>
   )
@@ -623,10 +611,29 @@ export default function App() {
   const dropRef = useRef(null)
   const clock   = useClock()
 
-  const { status: mqttStatus, liveData, publishZoneCmd } = useMQTT(MQTT_BROKER_URL)
-  const chartSeed    = useSupabaseSeed()
-  const chartHistory = useChartHistory(selectedRoom.id === 'r204' ? liveData : null, chartSeed)
+  const { status: mqttStatus, liveData, espStatus, publishZoneCmd } = useMQTT(MQTT_BROKER_URL)
+  const supabaseStatus = useSupabaseStatus()
+  const chartHistory = useChartHistory(selectedRoom.id === 'r204' ? liveData : null)
   const alertRows    = useAlerts()
+
+  // Inject local synthetic alerts for Supabase realtime status changes.
+  // These are not persisted — they reflect the current browser session only.
+  const [localAlerts, setLocalAlerts]   = useState([])
+  const [alertDateFilter, setAlertDateFilter] = useState('all')
+  const [customFrom, setCustomFrom]     = useState('')
+  const [customTo, setCustomTo]         = useState('')
+  const [alertPage, setAlertPage]       = useState(1)
+  const ALERTS_PER_PAGE = 10
+  const prevSupabaseStatusRef = useRef(null)
+  useEffect(() => {
+    const prev = prevSupabaseStatusRef.current
+    prevSupabaseStatusRef.current = supabaseStatus
+    if (prev === null || prev === supabaseStatus) return
+    const entry = supabaseStatus === 'connected'
+      ? { id: `sb-${Date.now()}`, type: 'ok',   title: 'Supabase connected',    body: 'Cloud database realtime connection established.',           inserted_at: new Date().toISOString() }
+      : { id: `sb-${Date.now()}`, type: 'warn',  title: 'Supabase disconnected', body: 'Cloud database realtime connection lost. Reconnecting…', inserted_at: new Date().toISOString() }
+    setLocalAlerts(prev => [entry, ...prev].slice(0, 5))
+  }, [supabaseStatus])
 
   // Stale detection: MQTT says connected but no data for >30 s
   const lastDataTsRef = useRef(0)
@@ -679,11 +686,38 @@ export default function App() {
     }
   }, [selectedRoom.id, liveData])
 
-  // Connection status labels for edge pill and cloud chip
-  const isLive    = mqttStatus === 'connected'
-  const edgeLabel = { connected: 'Edge node online', connecting: 'Connecting…', disconnected: 'Edge node offline', error: 'Connection error' }[mqttStatus] || 'Edge node offline'
-  const edgeSub   = isStale ? 'ESP8266 · data may be stale' : isLive ? 'ESP8266 · live data active' : 'ESP8266 · local control active'
-  const chipLabel = isStale ? 'Stale' : isLive ? 'Live' : mqttStatus === 'connecting' ? 'Connecting…' : 'Offline'
+  // Patch alert KPI with live counts from the event log.
+  const displayData = useMemo(() => {
+    const today = new Date().toDateString()
+    const todayCount = alertRows.filter(r =>
+      new Date(r.inserted_at).toDateString() === today
+    ).length
+    const kpis = data.kpis.map(k =>
+      k.icon !== 'alert' ? k : {
+        ...k,
+        val:      String(todayCount),
+        trend:    todayCount > 0 ? `${todayCount} today` : 'none',
+        trendCls: todayCount > 0 ? 'dn' : 'up',
+      }
+    )
+    return { ...data, kpis }
+  }, [data, alertRows, localAlerts])
+
+  // Edge pill — ESP8266 device status (from lumenclass/status topic)
+  // Falls back to broker connection state until the first device message arrives.
+  const isEdgeLive = espStatus === 'online' || (espStatus === null && mqttStatus === 'connected')
+  const edgeStatus = isStale                          ? 'stale'
+                   : isEdgeLive                       ? 'connected'
+                   : mqttStatus === 'connecting'      ? 'connecting'
+                   : 'disconnected'
+  const edgeLabel  = isStale        ? 'ESP8266 stale'
+                   : isEdgeLive    ? 'ESP8266 connected'
+                   : mqttStatus === 'connecting' ? 'ESP8266 connecting…'
+                   : 'ESP8266 disconnected'
+
+  // Cloud chip — Supabase connection status
+  const isLive    = supabaseStatus === 'connected'
+  const chipLabel = supabaseStatus === 'connected' ? 'Live' : supabaseStatus === 'connecting' ? 'Connecting…' : 'Offline'
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -704,25 +738,68 @@ export default function App() {
     return () => { document.body.style.overflow = '' }
   }, [mobileMenuOpen])
 
+  const todayLabel = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+
   const navItems = [
     { section: 'Monitor', items: [
       { label: 'Dashboard', icon: 'dashboard' },
-      { label: 'Alerts',    icon: 'shield'    },
+      { label: 'Alerts & Events', icon: 'shield' },
     ]}
   ]
 
-  const alertItems = alertRows.map(row => ({
-    id:   row.id,
-    type: row.type,
-    icon: ALERT_ICON[row.type] ?? 'info',
-    title: row.title,
-    body:  row.body,
-    time:  formatAlertTime(row.inserted_at),
-  }))
+  const mapAlert = row => ({
+    id:          row.id,
+    type:        row.type,
+    icon:        ALERT_ICON[row.type] ?? 'info',
+    title:       row.title,
+    body:        row.body,
+    time:        formatAlertTime(row.inserted_at),
+    inserted_at: row.inserted_at ?? null,
+  })
 
-  const pageMeta = activeNav === 'Alerts'
+  // Dashboard widget: local session alerts + DB rows, newest first
+  const alertItems = [...localAlerts, ...alertRows]
+    .sort((a, b) => {
+      if (!a.inserted_at) return -1
+      if (!b.inserted_at) return  1
+      return new Date(b.inserted_at) - new Date(a.inserted_at)
+    })
+    .map(mapAlert)
+
+  // Alerts & Events page: DB rows only so count matches Supabase
+  const dbAlertItems = alertRows
+    .slice()
+    .sort((a, b) => new Date(b.inserted_at) - new Date(a.inserted_at))
+    .map(mapAlert)
+
+  // Reset to first page whenever filter or source data changes
+  const prevFilterRef = useRef(alertDateFilter)
+  if (prevFilterRef.current !== alertDateFilter) {
+    prevFilterRef.current = alertDateFilter
+    if (alertPage !== 1) setAlertPage(1)
+  }
+
+  const filteredAlertItems = dbAlertItems.filter(a => {
+    if (alertDateFilter === 'all') return true
+    const d = new Date(a.inserted_at)
+    const today     = new Date(); today.setHours(0,0,0,0)
+    const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1)
+    if (alertDateFilter === 'today')     return d >= today
+    if (alertDateFilter === 'yesterday') return d >= yesterday && d < today
+    if (alertDateFilter === 'custom') {
+      const from = customFrom ? new Date(customFrom) : null
+      const to   = customTo   ? new Date(customTo + 'T23:59:59') : null
+      return (!from || d >= from) && (!to || d <= to)
+    }
+    return true
+  })
+
+  const totalAlertPages  = Math.max(1, Math.ceil(filteredAlertItems.length / ALERTS_PER_PAGE))
+  const pagedAlertItems  = filteredAlertItems.slice((alertPage - 1) * ALERTS_PER_PAGE, alertPage * ALERTS_PER_PAGE)
+
+  const pageMeta = activeNav === 'Alerts & Events'
     ? { title: 'Alerts Center', desc: 'All device events, warnings, and activity stream' }
-    : { title: data.title, desc: data.desc }
+    : { title: displayData.title, desc: displayData.desc }
 
   return (
     <div className={dark ? 'dark' : ''}>
@@ -769,7 +846,7 @@ export default function App() {
                 </div>
 
                 <div className="mobile-menu-footer">
-                  <EdgePill isLive={isLive} edgeLabel={edgeLabel} edgeSub={edgeSub} />
+                  <EdgePill status={edgeStatus} edgeLabel={edgeLabel} />
                 </div>
               </div>
             </div>
@@ -806,7 +883,7 @@ export default function App() {
             ))}
 
             <div className="side-foot">
-              <EdgePill />
+              <EdgePill status={edgeStatus} edgeLabel={edgeLabel} />
             </div>
           </aside>
 
@@ -856,7 +933,7 @@ export default function App() {
 
                 {/* Live / offline chip */}
                 <div className={`chip ${isLive ? 'online' : ''}`}>
-                  <Icon name="cloudCheck" style={{ width: 13, height: 13 }} />
+                  <Icon name="cloud" style={{ width: 13, height: 13 }} />
                   {chipLabel}
                 </div>
 
@@ -880,10 +957,10 @@ export default function App() {
               <>
                 {/* KPIs */}
                 <div className="kpis items-center justify-center min-h-screen">
-                  {data.kpis.map((k, i) => (
+                  {displayData.kpis.map((k, i) => (
                     <div key={i} className={`kpi ${k.cls}`}>
                       <div className="ic"><Icon name={k.icon} stroke="currentColor" /></div>
-                      <div className={`trend ${k.trendCls}`}>{k.trend}</div>
+                      <div className={`trend ${k.trendCls}`}>{todayLabel}</div>
                       <div className="val">{k.val} <small>{k.unit}</small></div>
                       <div className="lab">{k.lab}</div>
                     </div>
@@ -898,7 +975,7 @@ export default function App() {
                     <div className="card-h">
                       <div>
                         <h3>Daylight vs. Lighting Output</h3>
-                        <span className="sub">{chartHistory.length > 0 ? 'Last 10 min · live MQTT data' : 'Last 12 hours · auto-dimming response'}</span>
+                        <span className="sub">{chartHistory.length > 0 ? 'Last 10 min · live MQTT data' : 'Last 10 min · live MQTT data'}</span>
                       </div>
                       <div className="legend">
                         <span className="legend-item">
@@ -920,10 +997,10 @@ export default function App() {
                           <Icon name="lightThreshold" />
                           Light threshold
                         </div>
-                        <div className="sensor-val">{data.sensorLux} <small>lux</small></div>
+                        <div className="sensor-val">{displayData.sensorLux} <small>lux</small></div>
                         <div className="dim-row" style={{ marginTop: 10 }}>
                           <div className="bar">
-                            <div className="bar-fill" style={{ width: `${Math.min((parseInt(data.sensorLux) / 1000) * 100, 100)}%` }} />
+                            <div className="bar-fill" style={{ width: `${Math.min((parseInt(displayData.sensorLux) / 1000) * 100, 100)}%` }} />
                           </div>
                         </div>
                       </div>
@@ -933,9 +1010,9 @@ export default function App() {
                           Edge decision
                         </div>
                         <div className="sensor-val" style={{ fontSize: 18, color: 'var(--tealD)' }}>
-                          {data.sensorDecision}
+                          {displayData.sensorDecision}
                         </div>
-                        <div className="zmeta" style={{ marginTop: 8 }}>{data.sensorDecisionNote}</div>
+                        <div className="zmeta" style={{ marginTop: 8 }}>{displayData.sensorDecisionNote}</div>
                       </div>
                     </div>
                   </div>
@@ -945,11 +1022,11 @@ export default function App() {
                     <div className="card-h">
                       <div>
                         <h3>Zone Control</h3>
-                        <span className="sub">{data.zones.length} zones · manual override</span>
+                        <span className="sub">{displayData.zones.length} zones · manual override</span>
                       </div>
                     </div>
                     <div className="zones">
-                      {data.zones.map((zone, i) => (
+                      {displayData.zones.map((zone, i) => (
                         <ZoneCard
                           key={zone.id + selectedRoom.id}
                           zone={zone}
@@ -963,15 +1040,15 @@ export default function App() {
                   <div className="card span2">
                     <div className="card-h">
                       <div>
-                        <h3>Recent Activity &amp; Alerts</h3>
+                        <h3>Recent Alerts &amp; Events</h3>
                         <span className="sub">edge events · MQTT stream</span>
                       </div>
-                      <button className="view-alerts" onClick={() => setActiveNav('Alerts')}>
-                        View all alerts
+                      <button className="view-alerts" onClick={() => setActiveNav('Alerts & Events')}>
+                        View all
                       </button>
                     </div>
                     <div className="alerts">
-                      {alertItems.map(alert => (
+                      {alertItems.slice(0, 5).map(alert => (
                         <div key={alert.id} className={`alert ${alert.type}`}>
                           <div className="ad"><Icon name={alert.icon} stroke={alert.type === 'ok' ? 'var(--good)' : undefined} /></div>
                           <div>
@@ -1002,17 +1079,59 @@ export default function App() {
               </>
             )}
 
-            {activeNav === 'Alerts' && (
+            {activeNav === 'Alerts & Events' && (
               <div className="alerts-page">
                 <div className="card">
                   <div className="card-h">
                     <div>
                       <h3>All Alerts</h3>
-                      <span className="sub">edge events · MQTT stream</span>
+                      <span className="sub">{filteredAlertItems.length} event{filteredAlertItems.length !== 1 ? 's' : ''}</span>
                     </div>
                   </div>
+
+
+                  {/* Date filter bar */}
+                  <div className="alert-filter-bar">
+                    <div className="alert-filter-chips">
+                      {['all', 'today', 'yesterday'].map(f => (
+                        <button
+                          key={f}
+                          className={`alert-filter-chip ${alertDateFilter === f ? 'active' : ''}`}
+                          onClick={() => setAlertDateFilter(f)}
+                        >
+                          {f.charAt(0).toUpperCase() + f.slice(1)}
+                        </button>
+                      ))}
+                      <button
+                        className={`alert-filter-chip ${alertDateFilter === 'custom' ? 'active' : ''}`}
+                        onClick={() => setAlertDateFilter('custom')}
+                      >
+                        Custom range
+                      </button>
+                    </div>
+                    {alertDateFilter === 'custom' && (
+                      <div className="alert-filter-range">
+                        <input
+                          type="date"
+                          className="alert-date-input"
+                          value={customFrom}
+                          onChange={e => setCustomFrom(e.target.value)}
+                        />
+                        <span className="alert-range-sep">to</span>
+                        <input
+                          type="date"
+                          className="alert-date-input"
+                          value={customTo}
+                          onChange={e => setCustomTo(e.target.value)}
+                        />
+                      </div>
+                    )}
+                  </div>
+
                   <div className="alerts">
-                    {alertItems.map(alert => (
+                    {filteredAlertItems.length === 0 ? (
+                      <div className="alerts-empty">No events for this date range.</div>
+                    ) : pagedAlertItems.map(alert => (
                       <div key={`page-${alert.id}`} className={`alert ${alert.type}`}>
                         <div className="ad"><Icon name={alert.icon} stroke={alert.type === 'ok' ? 'var(--good)' : undefined} /></div>
                         <div>
@@ -1023,6 +1142,44 @@ export default function App() {
                       </div>
                     ))}
                   </div>
+
+                  {totalAlertPages > 1 && (
+                    <div className="alert-pagination">
+                      <button
+                        className="alert-page-btn"
+                        disabled={alertPage === 1}
+                        onClick={() => setAlertPage(p => p - 1)}
+                      >
+                        ‹ Prev
+                      </button>
+                      <div className="alert-page-numbers">
+                        {Array.from({ length: totalAlertPages }, (_, i) => i + 1)
+                          .filter(n => n === 1 || n === totalAlertPages || Math.abs(n - alertPage) <= 1)
+                          .reduce((acc, n, idx, arr) => {
+                            if (idx > 0 && n - arr[idx - 1] > 1) acc.push('…')
+                            acc.push(n)
+                            return acc
+                          }, [])
+                          .map((n, i) =>
+                            n === '…'
+                              ? <span key={`ellipsis-${i}`} className="alert-page-ellipsis">…</span>
+                              : <button
+                                  key={n}
+                                  className={`alert-page-num ${alertPage === n ? 'active' : ''}`}
+                                  onClick={() => setAlertPage(n)}
+                                >{n}</button>
+                          )
+                        }
+                      </div>
+                      <button
+                        className="alert-page-btn"
+                        disabled={alertPage === totalAlertPages}
+                        onClick={() => setAlertPage(p => p + 1)}
+                      >
+                        Next ›
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
