@@ -14,7 +14,7 @@ WIFI_SSID     = 'realme C55 ea33'
 WIFI_PASSWORD = 'idqi8586'
 
 # ── MQTT broker (plain TCP port 1883) ─────────────────────────
-MQTT_BROKER    = '10.73.48.195'   # IP of the machine running Mosquitto
+MQTT_BROKER    = '10.241.14.195'   # IP of the machine running Mosquitto
 MQTT_PORT      = 1883
 MQTT_CLIENT_ID = b'esp8266-lumenclass'
 
