@@ -10,11 +10,11 @@ import ujson
 from umqtt.simple import MQTTClient
 
 # ── WiFi credentials ──────────────────────────────────────────
-WIFI_SSID     = 'realme C55 ea33'
-WIFI_PASSWORD = 'idqi8586'
+WIFI_SSID     = 'ZTE_BETA_P72UEQ'
+WIFI_PASSWORD = 'rRRG/09021995'
 
 # ── MQTT broker (plain TCP port 1883) ─────────────────────────
-MQTT_BROKER    = '10.241.14.195'   # IP of the machine running Mosquitto
+MQTT_BROKER    = '192.168.1.13'   # IP of the machine running Mosquitto
 MQTT_PORT      = 1883
 MQTT_CLIENT_ID = b'esp8266-lumenclass'
 
@@ -23,7 +23,7 @@ TOPIC_STATUS = b'lumenclass/status'
 TOPIC_ZONE   = b'lumenclass/zone/+/cmd'   # subscribed; + matches zone index
 
 # ── Pin assignments ───────────────────────────────────────────
-PIR_PINS       = [12, 13, 14, 5]   # D6, D7, D5, D1
+PIR_PINS       = [5, 14, 12, 13]   # D1, D5, D6, D7
 LED_PINS       = [0, 2, 15, 16]    # D3, D4, D8, D0
 MOSFET_GATE_PIN = 4                # D2
 
@@ -67,6 +67,13 @@ zone_overrides = [None] * len(LED_PINS)
 # Stays False until the PIR has fired at least once; prevents the
 # hold-timer from triggering on the initial last_motion_ts = 0 value.
 motion_triggered = [False] * len(LED_PINS)
+
+# ── Debounce ──────────────────────────────────────────────────
+# PIR must read HIGH for this many consecutive loop iterations
+# before motion is accepted. At 200 ms per loop: 3 × 200 ms = 600 ms.
+# Eliminates brief electrical spikes and sensor re-trigger noise.
+PIR_DEBOUNCE_COUNT  = 3
+pir_high_streak = [0] * len(pirs)  # consecutive HIGH count per zone
 
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -184,8 +191,17 @@ def run_controller(interval_ms=200):
 
             for i, pir in enumerate(pirs):
                 pir_high = bool(pir.value())
+
+                # Debounce: increment streak on HIGH, reset immediately on LOW
                 if pir_high:
-                    last_motion_ts[i]  = now
+                    pir_high_streak[i] += 1
+                else:
+                    pir_high_streak[i] = 0
+
+                # Only accept motion once the signal has been stable for
+                # PIR_DEBOUNCE_COUNT consecutive reads (≥ 600 ms)
+                if pir_high_streak[i] >= PIR_DEBOUNCE_COUNT:
+                    last_motion_ts[i]   = now
                     motion_triggered[i] = True
 
                 override = zone_overrides[i]

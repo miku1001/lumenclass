@@ -8,7 +8,7 @@ import machine
 import time
 
 
-PIR_PINS = [12, 13, 14, 5]   # D6, D7, D5, D1
+PIR_PINS = [5, 14, 12, 13]   # D1, D5, D6, D7
 LED_PINS = [0, 2, 15, 16]    # D3, D4, D8, D0
 MOSFET_GATE_PIN = 4          # D2
 LED_ACTIVE_HIGH = True
