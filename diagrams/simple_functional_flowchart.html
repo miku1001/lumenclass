@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LumenClass — Functional Flowchart (Simplified)</title>
+<style>
+  :root{
+    --amber:#F2A310; --amberD:#C97E05; --teal:#1FB6A6;
+    --slate:#16202B; --ink:#1f2c3a; --mute:#5b6b7b; --line:#9fb0c0;
+    --bg:#f4f7fa; --good:#22a06b; --bad:#e2574c; --proc:#2f80ed;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:'Segoe UI',system-ui,-apple-system,sans-serif;padding:40px 20px 56px;}
+  .page{max-width:680px;margin:0 auto;}
+  h1{text-align:center;font-size:22px;color:var(--slate);margin:0 0 4px;}
+  .sub{text-align:center;color:var(--mute);font-size:13px;margin:0 0 22px;}
+
+  .legend{display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin:0 0 28px;font-size:12px;color:var(--mute);}
+  .legend span{display:inline-flex;align-items:center;gap:7px;}
+  .chip{width:20px;height:13px;border:2px solid;}
+  .chip.term{border-radius:20px;background:#e8eef5;border-color:var(--slate);}
+  .chip.proc{border-radius:4px;background:#eaf3ff;border-color:var(--proc);}
+  .chip.dec{clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%);background:var(--amberD);border:none;width:17px;height:14px;}
+  .chip.out{border-radius:4px;background:#eafaf6;border-color:var(--teal);}
+
+  .flow{display:flex;flex-direction:column;align-items:center;}
+  .n{border:2px solid;border-radius:10px;background:#fff;padding:10px 15px;max-width:260px;
+    text-align:center;font-size:12.6px;line-height:1.4;box-shadow:0 3px 9px rgba(22,32,43,.06);}
+  .n b{display:block;}
+  .n small{color:var(--mute);font-size:10.8px;display:block;margin-top:2px;}
+  .term{border-color:var(--slate);background:#e8eef5;border-radius:24px;font-weight:600;}
+  .proc{border-color:var(--proc);background:#eaf3ff;}
+  .out{border-color:var(--teal);background:#eafaf6;}
+  .branch .n{max-width:100%;}
+
+  .dec{position:relative;width:222px;height:122px;margin:14px 0;
+    display:flex;align-items:center;justify-content:center;text-align:center;}
+  .dec.sm{width:186px;height:106px;margin:12px 0;}
+  .dec::before,.dec::after{content:'';position:absolute;clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%);}
+  .dec::before{inset:0;background:var(--amberD);}
+  .dec::after{inset:2.5px;background:#fff7e6;}
+  .dec span{position:relative;z-index:1;display:block;font-size:12.3px;font-weight:600;line-height:1.32;width:150px;}
+  .dec.sm span{font-size:11.6px;width:124px;}
+
+  .arrow{width:3px;height:28px;background:var(--line);position:relative;margin:2px 0;}
+  .arrow::after{content:'';position:absolute;bottom:-2px;left:50%;transform:translateX(-50%);
+    border-left:6px solid transparent;border-right:6px solid transparent;border-top:10px solid var(--line);}
+  .arrow.lbl::before{content:attr(data-l);position:absolute;left:10px;top:50%;transform:translateY(-50%);
+    white-space:nowrap;font-size:10.8px;color:var(--mute);background:var(--bg);padding:0 4px;font-weight:700;}
+  .arrow.yes::before{color:var(--good);}
+  .arrow.no::before{color:var(--bad);}
+
+  /* branch with fork connector (stem + distribution bar align to the two arrows) */
+  .branch{--w:200px; --g:40px; position:relative; display:flex; gap:var(--g);
+    justify-content:center; align-items:flex-start; padding-top:18px;}
+  .branch > .col{display:flex;flex-direction:column;align-items:center;width:var(--w);}
+  .branch::before{content:'';position:absolute;top:15px;left:calc(var(--w) / 2);
+    width:calc(var(--w) + var(--g));height:3px;background:var(--line);}
+  .branch::after{content:'';position:absolute;top:-14px;left:50%;transform:translateX(-50%);
+    width:3px;height:30px;background:var(--line);}
+
+  .loop{font-size:11px;color:var(--amberD);font-weight:700;margin-top:10px;}
+  .loop::before{content:'↺ ';font-size:14px;}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Functional Flowchart — Occupancy &amp; Auto-Brightness</h1>
+  <p class="sub">Core feature: how the ESP8266 decides each zone's light state &amp; level (per cycle)</p>
+
+  <div class="legend">
+    <span><i class="chip term"></i>Start / End</span>
+    <span><i class="chip proc"></i>Process</span>
+    <span><i class="chip dec"></i>Decision</span>
+    <span><i class="chip out"></i>Output</span>
+  </div>
+
+  <div class="flow">
+    <div class="n term"><b>Read PIR + LDR for the zone</b></div>
+    <div class="arrow"></div>
+
+    <!-- Decision 1: motion -->
+    <div class="dec"><span>Motion detected?<br><small style="font-weight:500">(stable ≥ 3 reads)</small></span></div>
+    <div class="branch" style="--w:280px;">
+      <!-- NO path: check the 10 s hold timer -->
+      <div class="col">
+        <div class="arrow no lbl" data-l="NO"></div>
+        <div class="dec sm"><span>Still within 10 s hold?</span></div>
+        <div class="branch" style="--w:118px; --g:24px;">
+          <div class="col">
+            <div class="arrow no lbl" data-l="NO"></div>
+            <div class="n out"><b>Light OFF</b></div>
+          </div>
+          <div class="col">
+            <div class="arrow yes lbl" data-l="YES"></div>
+            <div class="n proc"><b>Keep ON</b></div>
+          </div>
+        </div>
+      </div>
+      <!-- YES path -->
+      <div class="col">
+        <div class="arrow yes lbl" data-l="YES"></div>
+        <div class="n proc"><b>Light ON</b><small>reset 10 s hold timer</small></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <!-- Decision 2: brightness -->
+    <div class="dec"><span>Is the light ON?</span></div>
+    <div class="branch" style="--w:220px;">
+      <div class="col">
+        <div class="arrow no lbl" data-l="NO"></div>
+        <div class="n out"><b>Brightness = 0</b></div>
+      </div>
+      <div class="col">
+        <div class="arrow yes lbl" data-l="YES"></div>
+        <div class="n proc"><b>Map daylight → dim level</b><small>brighter room = dimmer LED (LDR → PWM)</small></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="n out"><b>Apply to LED + shared MOSFET</b></div>
+    <div class="arrow"></div>
+    <div class="n term"><b>Publish zone state over MQTT</b></div>
+    <div class="loop">repeats for every zone, each cycle</div>
+  </div>
+</div>
+</body>
+</html>
